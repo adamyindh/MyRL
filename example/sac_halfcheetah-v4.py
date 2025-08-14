@@ -108,9 +108,11 @@ if __name__ == "__main__":
     parser.add_argument("--alpha_learning_rate", type=float, default=1e-3)
 
     # special parameter
+    parser.add_argument("--n_steps", type=int, default=20)
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--tau", type=float, default=0.005)
     parser.add_argument("--alpha", type=float, default=math.e)
+
     # auto_alpha 同时决定是否自动调整 alpha 和 beta
     parser.add_argument("--auto_alpha", type=bool, default=True)
     parser.add_argument("--delay_update", type=int, default=2)
@@ -194,7 +196,8 @@ if __name__ == "__main__":
 
     # 根据已有参数，再初始化参数
     args = init_args(envs, **args)
-
+    n_steps = args['n_steps']
+    gamma = args['gamma']
     ################################################
     # Step1-Step5：执行训练与评估的过程
 

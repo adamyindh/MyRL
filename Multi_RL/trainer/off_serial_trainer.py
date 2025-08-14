@@ -23,6 +23,9 @@ class OffSerialTrainer:
         self.buffer = buffer
         self.evaluator = evaluator
 
+        self.n_steps = kwargs['n_steps']
+        self.gamma = kwargs['gamma']
+
         # 暂时不考虑优先经验回放，因此 self.per_flag=False
         self.per_flag = kwargs["buffer_name"] == "prioritized_replay_buffer"
 

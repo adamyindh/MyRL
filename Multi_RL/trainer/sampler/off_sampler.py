@@ -23,7 +23,7 @@ class OffSampler(BaseSampler):
         for _ in range(self.horizon):
             # experiences 是以列表形式返回的，因此才能通过 .extend() 函数添加到列表 batch_data 中
             # batch_data 通过调用 extend 函数，将 experiences 里存储的所有experience类对象全都添加到了batch_data中
-            experiences = self._step()
+            experiences = self._nstep()
             # experiences 是一个列表（可迭代对象）
             # 使用 extend 会将 experiences 中的每个元素（即每个 Experience 实例）逐个添加到 batch_data 中
             batch_data.extend(experiences)

@@ -3,6 +3,7 @@
 """
 
 from abc import ABCMeta, abstractmethod
+from collections import deque
 from Multi_RL.utils.common_utils import get_env_type, get_env_id
 from Multi_RL.create_pkg.create_envs import create_envs
 from Multi_RL.create_pkg.create_alg import create_approx_contrainer
@@ -100,6 +101,13 @@ class BaseSampler(metaclass=ABCMeta):
         self.obs, _ = self.envs.reset(seed=kwargs["env_seed"])
         # # 设置 self.obs 的类型为 float32
         self.obs = np.float32(self.obs)
+            
+        # 在Sampler类中初始化n步缓冲区
+        # n_steps为多步方法的步数，gamma为折扣因子
+        self.n_steps = kwargs['n_steps']
+        self.gamma = kwargs['gamma']
+        self.n_step_buffers = [deque(maxlen=self.n_steps) for _ in range(self.num_envs)]  # 每个环境一个缓冲区
+
 
     def get_total_sample_num(self) -> int:
         return self.total_sample_number
@@ -126,94 +134,94 @@ class BaseSampler(metaclass=ABCMeta):
         self.networks.load_state_dict(state_dict)
 
 
-    def _step(self,) -> List[Experience]:
-        """
-        返回的是一个由 Experience 对象组成的列表
-        返回多个经验样本：函数通常执行一步或多步环境交互，收集多个状态转换并封装为 Experience 对象
-        批量处理：列表中的每个元素对应一个时间步的经验，适用于批量训练或并行环境
-        """
-        # 如果是仅有 1 个环境
-        # （在我们创建的环境中）根据测试，不管是单个环境（num_envs=1）还是多个并行的环境（num_envs=5）
-        # 通过 reset 函数得到的 obs 的 shape 都是：[num_envs, obs_dim]
-        # 随机策略网络生成的 logits 的 shape 是：[num_envs, 2 * act_dim]
-        # 根据 logits 生成的动作的 shape 是：[num_envs, 1 * act_dim]，对应的 log_prob 的 shape 是：[num_envs]
-        # 把 num_envs 视为 batch_size 也是可行的，因为 num_envs 本质上就决定了生成的 obs 的数量
-        # GOPS 代码里对于单环境，obs 和 act 可能没有第 0 个关于批次的维度，因此需要使用 expand_dims
-        # 因此，我们这里只需要参考 GOPS 关于多环境的代码即可，因为我们创建的env生成的obs个act自带第 0 个batch_size维度
-        # 因此我们不需要像 GOPS 那样，分 num_envs 为 1 还是 5 来讨论
-        obs_tensor = torch.from_numpy(self.obs)
+    # def _step(self,) -> List[Experience]:
+    #     """
+    #     返回的是一个由 Experience 对象组成的列表
+    #     返回多个经验样本：函数通常执行一步或多步环境交互，收集多个状态转换并封装为 Experience 对象
+    #     批量处理：列表中的每个元素对应一个时间步的经验，适用于批量训练或并行环境
+    #     """
+    #     # 如果是仅有 1 个环境
+    #     # （在我们创建的环境中）根据测试，不管是单个环境（num_envs=1）还是多个并行的环境（num_envs=5）
+    #     # 通过 reset 函数得到的 obs 的 shape 都是：[num_envs, obs_dim]
+    #     # 随机策略网络生成的 logits 的 shape 是：[num_envs, 2 * act_dim]
+    #     # 根据 logits 生成的动作的 shape 是：[num_envs, 1 * act_dim]，对应的 log_prob 的 shape 是：[num_envs]
+    #     # 把 num_envs 视为 batch_size 也是可行的，因为 num_envs 本质上就决定了生成的 obs 的数量
+    #     # GOPS 代码里对于单环境，obs 和 act 可能没有第 0 个关于批次的维度，因此需要使用 expand_dims
+    #     # 因此，我们这里只需要参考 GOPS 关于多环境的代码即可，因为我们创建的env生成的obs个act自带第 0 个batch_size维度
+    #     # 因此我们不需要像 GOPS 那样，分 num_envs 为 1 还是 5 来讨论
+    #     obs_tensor = torch.from_numpy(self.obs)
 
-        # 根据环境状态，获得动作的分布，然后根据动作采样动作
-        logits = self.networks.policy(obs_tensor)
-        action_distribution = self.networks.create_action_distributions(logits)
-        actions, log_probs = action_distribution.sample()
+    #     # 根据环境状态，获得动作的分布，然后根据动作采样动作
+    #     logits = self.networks.policy(obs_tensor)
+    #     action_distribution = self.networks.create_action_distributions(logits)
+    #     actions, log_probs = action_distribution.sample()
 
-        # 屏蔽 action 和 logp 的梯度，并转为 NumPy 类型的变量，确保数据类型为 float32
-        actions = actions.detach().numpy().astype("float32")
-        log_probs = log_probs.detach().numpy().astype("float32")
+    #     # 屏蔽 action 和 logp 的梯度，并转为 NumPy 类型的变量，确保数据类型为 float32
+    #     actions = actions.detach().numpy().astype("float32")
+    #     log_probs = log_probs.detach().numpy().astype("float32")
 
-        # 如果考虑探索噪声，对动作再加上干扰
-        if self.noise_params is not None:
-            actions = self.noise_processor.sample(actions)
+    #     # 如果考虑探索噪声，对动作再加上干扰
+    #     if self.noise_params is not None:
+    #         actions = self.noise_processor.sample(actions)
 
-        # 如果是连续的空间，就对动作裁剪，使其在合理的上下限范围内
-        if self.action_type == "continu":
-            actions_clip = actions.clip(
-                self.envs.action_space.low, self.envs.action_space.high
-            )
-        else:
-            actions_clip = actions
+    #     # 如果是连续的空间，就对动作裁剪，使其在合理的上下限范围内
+    #     if self.action_type == "continu":
+    #         actions_clip = actions.clip(
+    #             self.envs.action_space.low, self.envs.action_space.high
+    #         )
+    #     else:
+    #         actions_clip = actions
 
-        # 然后就是与环境交互，获得反馈的数据
-        # 我们这里与环境交互的代码仍然保持与 CleanRL 一致，加"s"表示可能有多个环境
-        # 下面这部分代码参考 CleanRL 的交互过程（因为 gym 环境是最新的）
-        next_obs, rewards, terminations, truncations, infos = self.envs.step(actions_clip)
+    #     # 然后就是与环境交互，获得反馈的数据
+    #     # 我们这里与环境交互的代码仍然保持与 CleanRL 一致，加"s"表示可能有多个环境
+    #     # 下面这部分代码参考 CleanRL 的交互过程（因为 gym 环境是最新的）
+    #     next_obs, rewards, terminations, truncations, infos = self.envs.step(actions_clip)
 
-        # 将 next_obs, rewards 转化为 float32 类型的
-        next_obs = np.float32(next_obs)
-        rewards = np.float32(rewards)
+    #     # 将 next_obs, rewards 转化为 float32 类型的
+    #     next_obs = np.float32(next_obs)
+    #     rewards = np.float32(rewards)
 
-        # 真实的下一个时刻的状态（可能会遇到 episode 结束的情况，next_obs 不准确）
-        real_next_obs = next_obs.copy()
-        for idx, trunc in enumerate(truncations):
-            if trunc:
-                real_next_obs[idx] = infos["final_observation"][idx]
+    #     # 真实的下一个时刻的状态（可能会遇到 episode 结束的情况，next_obs 不准确）
+    #     real_next_obs = next_obs.copy()
+    #     for idx, trunc in enumerate(truncations):
+    #         if trunc:
+    #             real_next_obs[idx] = infos["final_observation"][idx]
 
-        # 目前只是计算单步的奖励，在实现 DLAC 算法的时候，需要计算多步奖励【N步TD】
-        # 根据不同的环境设置不同的 costs 以及对应的奖励，shape=[batch_size,]
-        if self.env_id == "HalfCheetah-v4":
-            costs = ((real_next_obs[:, 8] - self.target_value) ** 2) * self.reward_scale
-            # 注意：costs 和 rewards 之间始终保持“负值”关系，因此后续仅可通过 rewards 来确定 costs
-            rewards = -costs
-        else:
-            # 对于其他环境，先不重新设置 rewards
-            rewards = rewards * self.reward_scale
+    #     # 目前只是计算单步的奖励，在实现 DLAC 算法的时候，需要计算多步奖励【N步TD】
+    #     # 根据不同的环境设置不同的 costs 以及对应的奖励，shape=[batch_size,]
+    #     if self.env_id == "HalfCheetah-v4":
+    #         costs = ((real_next_obs[:, 8] - self.target_value) ** 2) * self.reward_scale
+    #         # 注意：costs 和 rewards 之间始终保持“负值”关系，因此后续仅可通过 rewards 来确定 costs
+    #         rewards = -costs
+    #     else:
+    #         # 对于其他环境，先不重新设置 rewards
+    #         rewards = rewards * self.reward_scale
         
-        # 根据 terminations 和 truncations 确定 dones，shape=[batch_size,]
-        dones = np.logical_or(terminations, truncations)
+    #     # 根据 terminations 和 truncations 确定 dones，shape=[batch_size,]
+    #     dones = np.logical_or(terminations, truncations)
 
-        # 最终想存储 (s,a,r,s',done,log_probs) 这 6 元组，存储 log_probs 因为涉及到熵
-        # 分为单环境和多环境存储，多环境的obs会涉及多个状态，需要形成for循环，将每一个元素单独放在一个Experience对象里
-        experiences = []
-        for i in range(0, self.num_envs):
-            experience = Experience(
-                obs=self.obs.copy()[i],  # shape=[obs_dim]
-                actions=actions_clip[i],  # shape=[act_dim]
-                rewards=rewards[i],  # float 类型的变量
-                next_obs=next_obs.copy()[i],  # shape=[obs_dim]
-                dones=dones[i],  # bool 类型的变量
-                log_probs=log_probs[i],  # float 类型的变量
-            )
-            # extend()：将可迭代对象（如列表、元组等）中的所有元素逐个添加到列表末尾
-            # append(x)：将 x 作为单个元素添加到列表末尾
-            # 使用 append 将 experience 作为单个元素添加到列表中，确保雷彪中的每个元素都是一个完整的 Experience 实例
-            experiences.append(experience)
+    #     # 最终想存储 (s,a,r,s',done,log_probs) 这 6 元组，存储 log_probs 因为涉及到熵
+    #     # 分为单环境和多环境存储，多环境的obs会涉及多个状态，需要形成for循环，将每一个元素单独放在一个Experience对象里
+    #     experiences = []
+    #     for i in range(0, self.num_envs):
+    #         experience = Experience(
+    #             obs=self.obs.copy()[i],  # shape=[obs_dim]
+    #             actions=actions_clip[i],  # shape=[act_dim]
+    #             rewards=rewards[i],  # float 类型的变量
+    #             next_obs=next_obs.copy()[i],  # shape=[obs_dim]
+    #             dones=dones[i],  # bool 类型的变量
+    #             log_probs=log_probs[i],  # float 类型的变量
+    #         )
+    #         # extend()：将可迭代对象（如列表、元组等）中的所有元素逐个添加到列表末尾
+    #         # append(x)：将 x 作为单个元素添加到列表末尾
+    #         # 使用 append 将 experience 作为单个元素添加到列表中，确保列表中的每个元素都是一个完整的 Experience 实例
+    #         experiences.append(experience)
 
-        # 更新状态
-        self.obs = next_obs
+    #     # 更新状态
+    #     self.obs = next_obs
 
-        # 返回形式：将单个经验包装成一个列表，列表的长度为 self.num_envs
-        return experiences
+    #     # 返回形式：将单个经验包装成一个列表，列表的长度为 self.num_envs
+    #     return experiences
 
     @abstractmethod
     def _sample(self) -> Union[List[Experience], dict]:
@@ -226,6 +234,83 @@ class BaseSampler(metaclass=ABCMeta):
         """
         pass
 
+
+    # 修改_step为_nstep，累积n步经验
+    def _nstep(self) -> List[Experience]:
+    # 原_step代码：获取当前步的obs, action, reward, next_obs, done
+        obs_tensor = torch.from_numpy(self.obs)
+        logits = self.networks.policy(obs_tensor)
+        action_distribution = self.networks.create_action_distributions(logits)
+        actions, log_probs = action_distribution.sample()
+        actions = actions.detach().numpy().astype("float32")
+        log_probs = log_probs.detach().numpy().astype("float32")
+        if self.noise_params is not None:
+            actions = self.noise_processor.sample(actions)
+        if self.action_type == "continu":
+            actions_clip = actions.clip(
+                self.envs.action_space.low, self.envs.action_space.high
+            )
+        else:
+            actions_clip = actions
+        next_obs, rewards, terminations, truncations, infos = self.envs.step(actions_clip)
+        next_obs = np.float32(next_obs)
+        rewards = np.float32(rewards)
+        real_next_obs = next_obs.copy()
+        for idx, trunc in enumerate(truncations):
+            if trunc:
+                real_next_obs[idx] = infos["final_observation"][idx]
+        if self.env_id == "HalfCheetah-v4":
+            costs = ((real_next_obs[:, 8] - self.target_value) ** 2) * self.reward_scale
+            rewards = -costs
+        else:
+            rewards = rewards * self.reward_scale
+        dones = np.logical_or(terminations, truncations)
+
+        experiences = []
+        for i in range(self.num_envs):
+            # 将当前步经验加入缓冲区（自动移除最旧的经验，保持maxlen=n_steps）
+            self.n_step_buffers[i].append(
+                (self.obs[i], actions_clip[i], rewards[i], dones[i])
+            )
+
+            # 生成n步经验的条件：缓冲区已满 或 最后一步是终止状态
+            buffer = self.n_step_buffers[i]
+            if len(buffer) == self.n_steps or (buffer and buffer[-1][3]):  # buffer[-1][3]是当前步的done
+                # 取缓冲区中最早的一步作为s_t和a_t
+                first_obs, first_act, _, _ = buffer[0]
+                
+                # 计算n步累积奖励（从第一步到最后一步）
+                cum_reward = 0.0
+                for t in range(len(buffer)):
+                    _, _, r, d = buffer[t]
+                    cum_reward += (self.gamma ** t) * r
+                    if d:  # 若中途终止，停止累积
+                        break
+                
+                # n步后的状态：若中途终止则用终止时的next_obs，否则用当前步的next_obs
+                if buffer[-1][3]:  # 最后一步是终止状态
+                    n_step_next_obs = real_next_obs[i]  # 终止步的next_obs
+                else:
+                    n_step_next_obs = next_obs[i]  # 非终止时，用当前步的next_obs（即s_{t+n}）
+                
+                # 封装n步经验
+                experiences.append(
+                    Experience(
+                        obs=first_obs,
+                        actions=first_act,
+                        rewards=cum_reward,
+                        next_obs=n_step_next_obs,
+                        dones=buffer[-1][3],  # 用最后一步的done
+                        log_probs=log_probs[i]  # 对应first_act的log_prob
+                    )
+                )
+
+                # 仅当终止时清空缓冲区（避免跨回合的经验被复用）
+                if buffer[-1][3]:
+                    self.n_step_buffers[i].clear()
+
+        return experiences
+    
     def sample(self) -> Tuple[Union[List[Experience], dict], dict]:
         self.total_sample_number += self.sample_batch_size
         tb_info = dict()

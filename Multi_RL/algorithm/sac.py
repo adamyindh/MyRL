@@ -75,7 +75,6 @@ class SAC:
     """
     def __init__(
         self,
-        gamma: float = 0.99,
         tau: float = 0.005,
         alpha: float = math.e,
         auto_alpha: bool = True,
@@ -84,8 +83,11 @@ class SAC:
     ):
         # 指定的参数主要是SAC算法的一些必要参数，除了这些参数外的其他参数是用于构造估计函数网络的参数
         self.networks = ApproxContainer(**kwargs)
-        self.gamma = gamma
         self.tau = tau
+
+        self.n_steps = kwargs['n_steps']
+        self.gamma = kwargs['gamma']
+
         # 对网络中的 log_alpha 初始化
         self.networks.log_alpha.data.fill_(math.log(alpha))
         self.auto_alpha = auto_alpha
@@ -191,9 +193,8 @@ class SAC:
             next_q = torch.min(next_q1, next_q2)
             # backup 表示的就是 TD target，在 sac 算法中，使用一步 TD 来更新Q
             # 在 DLAC 算法中，cost 指的就是多步累积代价，此时的TD target = cost + gamma^N Q
-            backup = rew + (1 - done) * self.gamma * (
-                next_q - self._get_alpha() * next_logp
-            )
+            gamma_n = self.gamma ** self.n_steps  # 需传入n_step参数
+            backup = rew + (1 - done) * gamma_n * (next_q - self._get_alpha() * next_logp)
 
         # 计算 2 个 q 网络的损失函数
         loss_q1 = ((q1 - backup) ** 2).mean()
