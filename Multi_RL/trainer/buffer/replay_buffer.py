@@ -6,6 +6,7 @@
 import numpy as np
 import sys
 import torch
+from collections import deque
 
 __all__ = ["ReplayBuffer"]
 
@@ -28,6 +29,37 @@ def combined_shape(length: int, shape=None):
     return (length, shape) if np.isscalar(shape) else (length, *shape)
 
 
+# class ReplayBuffer:
+#     """
+#     在 replay_buffer 中通过均匀采样获得样本
+#     """
+#     def __init__(self, **kwargs):
+#         self.obsv_dim = kwargs["obsv_dim"]
+#         self.act_dim = kwargs["action_dim"]
+#         self.max_size = kwargs["buffer_max_size"]
+
+#         # 存储数据的字典，存储数据的是experience对象，里面的数据有：(s,a,r,s',done,log_prob)
+#         # 构建用于存储数据的 NumPy 数组
+#         self.buf = {
+#             "obs": np.zeros(
+#                 combined_shape(self.max_size, self.obsv_dim), dtype=np.float32
+#             ),
+#             "act": np.zeros(
+#                 combined_shape(self.max_size, self.act_dim), dtype=np.float32
+#             ),
+#             "rew": np.zeros(self.max_size, dtype=np.float32),
+#             "obs2": np.zeros(
+#                 combined_shape(self.max_size, self.obsv_dim), dtype=np.float32
+#             ),
+#             "done": np.zeros(self.max_size, dtype=np.float32),
+#             "logp": np.zeros(self.max_size, dtype=np.float32),
+#         }
+
+#         # 这 2 个属性的作用暂时还未知
+#         self.ptr, self.size, = (0, 0,)
+
+
+
 class ReplayBuffer:
     """
     在 replay_buffer 中通过均匀采样获得样本
@@ -36,26 +68,28 @@ class ReplayBuffer:
         self.obsv_dim = kwargs["obsv_dim"]
         self.act_dim = kwargs["action_dim"]
         self.max_size = kwargs["buffer_max_size"]
+        self.n_steps=kwargs["n_steps"]
 
-        # 存储数据的字典，存储数据的是experience对象，里面的数据有：(s,a,r,s',done,log_prob)
+        # 存储数据的字典，存储数据的是experience对象，里面的数据有：(s,a,r,s',done,log_prob)*n
         # 构建用于存储数据的 NumPy 数组
         self.buf = {
             "obs": np.zeros(
-                combined_shape(self.max_size, self.obsv_dim), dtype=np.float32
+                combined_shape(self.max_size, (self.n_steps,self.obsv_dim)), dtype=np.float32
             ),
             "act": np.zeros(
-                combined_shape(self.max_size, self.act_dim), dtype=np.float32
+                combined_shape(self.max_size,(self.n_steps,self.act_dim)), dtype=np.float32
             ),
-            "rew": np.zeros(self.max_size, dtype=np.float32),
+            "rew": np.zeros((self.max_size,self.n_steps), dtype=np.float32),
             "obs2": np.zeros(
-                combined_shape(self.max_size, self.obsv_dim), dtype=np.float32
+                combined_shape(self.max_size, (self.n_steps,self.obsv_dim)), dtype=np.float32
             ),
-            "done": np.zeros(self.max_size, dtype=np.float32),
-            "logp": np.zeros(self.max_size, dtype=np.float32),
+            "done": np.zeros((self.max_size,self.n_steps), dtype=np.float32),
+            "logp": np.zeros((self.max_size,self.n_steps), dtype=np.float32),
         }
 
         # 这 2 个属性的作用暂时还未知
         self.ptr, self.size, = (0, 0,)
+
 
     def __len__(self):
         # 获取当前 replay buffer 的大小（存储了多少个数据）
@@ -72,36 +106,69 @@ class ReplayBuffer:
         """
         return int(sys.getsizeof(self.buf)) * self.size / (self.max_size * 1000000)
     
+    # def store(
+    #     self,
+    #     obs: np.ndarray,
+    #     act: np.ndarray,
+    #     rew: np.ndarray,
+    #     next_obs: np.ndarray,
+    #     done: np.ndarray,
+    #     logp: np.ndarray,
+    # ) -> None:
+    #     """
+    #     向 replay_buffer 中存储数据的函数，目前只存储 6 种数据，也就是 sampler 获取的数据
+    #     但是 sampler 对象调用 sample 函数返回的是列表形式的 experience 对象
+    #     但注意，这里存储数据到表格中，传入 store 中的数据的 shape 应该是没有 batch_size 维度的
+    #     因为 self.buf["obs"] 是一个指定了 batch_size 维度的 NumPy 数组，self.ptr 确定了数组的 index
+    #     所以 self.buf["obs"][self.ptr] 相当于为传入参数提前规划好了“空间”
+    #     对于 obs（状态向量），传入的数据一定是一个 shape=[obs_dim] 的向量，只有一个维度
+    #     对于 rew（标量），传入的数据一定是一个具体地float值，例如1.0
+    #     """
+    #     self.buf["obs"][self.ptr] = obs
+    #     self.buf["act"][self.ptr] = act
+    #     self.buf["rew"][self.ptr] = rew
+    #     self.buf["obs2"][self.ptr] = next_obs
+    #     self.buf["done"][self.ptr] = done
+    #     self.buf["logp"][self.ptr] = logp
+
+    #     # self.ptr 就是self.buf["obs"]（或其他定义好的NumPy数组）的索引
+    #     # 设置self.ptr是为了能够（在有max_size的限制下）及时更新self.buf["obs"]中的数据
+    #     self.ptr = (self.ptr + 1) % self.max_size
+
+    #     # 存入一个数据后，更新 replay buffer 的大小
+    #     self.size = min(self.size + 1, self.max_size)
+
     def store(
         self,
-        obs: np.ndarray,
-        act: np.ndarray,
-        rew: float,
-        next_obs: np.ndarray,
-        done: bool,
-        logp: np.ndarray,
-    ) -> None:
-        """
-        向 replay_buffer 中存储数据的函数，目前只存储 6 种数据，也就是 sampler 获取的数据
-        但是 sampler 对象调用 sample 函数返回的是列表形式的 experience 对象
-        但注意，这里存储数据到表格中，传入 store 中的数据的 shape 应该是没有 batch_size 维度的
-        因为 self.buf["obs"] 是一个指定了 batch_size 维度的 NumPy 数组，self.ptr 确定了数组的 index
-        所以 self.buf["obs"][self.ptr] 相当于为传入参数提前规划好了“空间”
-        对于 obs（状态向量），传入的数据一定是一个 shape=[obs_dim] 的向量，只有一个维度
-        对于 rew（标量），传入的数据一定是一个具体地float值，例如1.0
-        """
-        self.buf["obs"][self.ptr] = obs
-        self.buf["act"][self.ptr] = act
-        self.buf["rew"][self.ptr] = rew
-        self.buf["obs2"][self.ptr] = next_obs
-        self.buf["done"][self.ptr] = done
-        self.buf["logp"][self.ptr] = logp
+        obs: deque,  # 明确参数类型为 deque
+        act: deque,
+        rew: deque,
+        next_obs: deque,
+        logp: deque,
+        done: deque,
 
-        # self.ptr 就是self.buf["obs"]（或其他定义好的NumPy数组）的索引
-        # 设置self.ptr是为了能够（在有max_size的限制下）及时更新self.buf["obs"]中的数据
+        ) -> None:
+        """处理 deque 类型的n步数据，转换为 NumPy 数组后存储"""
+        # 1. 将 deque 转换为 NumPy 数组（核心步骤）
+        # 转换 obs: deque([obs1, obs2, ..., obsn]) → (n_steps, obsv_dim) 的二维数组
+        obs_np = np.squeeze(np.array(obs))  # 先转为列表，再转为数组
+        act_np = np.squeeze(np.array(act))
+        rew_np = np.squeeze(np.array(rew))
+        next_obs_np = np.squeeze(np.array(next_obs))
+        done_np = np.squeeze(np.array(done))
+        logp_np = np.squeeze(np.array(logp))
+
+
+        # 3. 存储转换后的 NumPy 数组
+        self.buf["obs"][self.ptr] = obs_np
+        self.buf["act"][self.ptr] = act_np
+        self.buf["rew"][self.ptr] = rew_np
+        self.buf["obs2"][self.ptr] = next_obs_np
+        self.buf["done"][self.ptr] = done_np
+        self.buf["logp"][self.ptr] = logp_np
+
+        # 4. 更新指针和大小（不变）
         self.ptr = (self.ptr + 1) % self.max_size
-
-        # 存入一个数据后，更新 replay buffer 的大小
         self.size = min(self.size + 1, self.max_size)
 
     def add_batch(self, samples: list) -> None:

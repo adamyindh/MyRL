@@ -85,7 +85,7 @@ class SAC:
         self.networks = ApproxContainer(**kwargs)
         self.tau = tau
 
-        self.n_steps = kwargs['n_steps']
+
         self.gamma = kwargs['gamma']
 
         # 对网络中的 log_alpha 初始化

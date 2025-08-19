@@ -24,12 +24,15 @@ class Experience(NamedTuple):
     结构化数据：每个实例包含强化学习中的一个经验样本，通常表示一个状态转换：(obs,actions,...,log_probs)
     属性访问：可以通过名称（如 exp.obs）或索引（如 exp[0]）访问字段
     """
-    obs: np.ndarray
-    actions: np.ndarray
-    rewards: float
-    next_obs: np.ndarray
-    dones: bool
-    log_probs: float
+
+    obs:np.ndarray
+    action:np.ndarray
+    rewards:np.ndarray
+    next_obs:np.ndarray
+    log_probs:np.ndarray
+    done:np.ndarray
+
+
 
 
 class BaseSampler(metaclass=ABCMeta):
@@ -107,6 +110,12 @@ class BaseSampler(metaclass=ABCMeta):
         self.n_steps = kwargs['n_steps']
         self.gamma = kwargs['gamma']
         self.n_step_buffers = [deque(maxlen=self.n_steps) for _ in range(self.num_envs)]  # 每个环境一个缓冲区
+        self.tol_state=deque(maxlen=self.n_steps)
+        self.tol_action=deque(maxlen=self.n_steps) 
+        self.tol_next_state=deque(maxlen=self.n_steps)
+        self.tol_done=deque(maxlen=self.n_steps)
+        self.tol_rewards=deque(maxlen=self.n_steps)
+        self.tol_log_probs=deque(maxlen=self.n_steps)
 
 
     def get_total_sample_num(self) -> int:
@@ -268,48 +277,56 @@ class BaseSampler(metaclass=ABCMeta):
 
         experiences = []
         for i in range(self.num_envs):
-            # 将当前步经验加入缓冲区（自动移除最旧的经验，保持maxlen=n_steps）
-            self.n_step_buffers[i].append(
-                (self.obs[i], actions_clip[i], rewards[i], dones[i])
-            )
+            # 存储当前步的完整信息（包含所有需要记录的字段）
+            self.n_step_buffers[i].append({
+                'state': self.obs.copy()[i],          # 当前步状态
+                'action': actions_clip[i], # 当前步动作
+                'rewards': rewards[i],     # 当前步奖励
+                'next_obs':next_obs.copy()[i],  #下一步状态
+                'log_probs': log_probs[i],  # 采取当前步动作的概率
+                'done': dones[i]          # 当前步是否为最终状态
+            })
+            
+            
+            self.tol_state.append(self.obs.copy())
+            self.tol_action.append(actions_clip)
+            self.tol_rewards.append(rewards)
+            self.tol_next_state.append(next_obs.copy())
+            self.tol_log_probs.append(log_probs)
+            self.tol_done.append(dones)
 
-            # 生成n步经验的条件：缓冲区已满 或 最后一步是终止状态
             buffer = self.n_step_buffers[i]
-            if len(buffer) == self.n_steps or (buffer and buffer[-1][3]):  # buffer[-1][3]是当前步的done
-                # 取缓冲区中最早的一步作为s_t和a_t
-                first_obs, first_act, _, _ = buffer[0]
-                
-                # 计算n步累积奖励（从第一步到最后一步）
-                cum_reward = 0.0
-                for t in range(len(buffer)):
-                    _, _, r, d = buffer[t]
-                    cum_reward += (self.gamma ** t) * r
-                    if d:  # 若中途终止，停止累积
-                        break
-                
-                # n步后的状态：若中途终止则用终止时的next_obs，否则用当前步的next_obs
-                if buffer[-1][3]:  # 最后一步是终止状态
-                    n_step_next_obs = real_next_obs[i]  # 终止步的next_obs
-                else:
-                    n_step_next_obs = next_obs[i]  # 非终止时，用当前步的next_obs（即s_{t+n}）
-                
-                # 封装n步经验
-                experiences.append(
-                    Experience(
-                        obs=first_obs,
-                        actions=first_act,
-                        rewards=cum_reward,
-                        next_obs=n_step_next_obs,
-                        dones=buffer[-1][3],  # 用最后一步的done
-                        log_probs=log_probs[i]  # 对应first_act的log_prob
-                    )
-                )
+            # 满足生成n步经验的条件（缓冲区满或终止）
+            if len(buffer) == self.n_steps or (buffer and buffer[-1]['done']):
 
-                # 仅当终止时清空缓冲区（避免跨回合的经验被复用）
-                if buffer[-1][3]:
+                # 2. 确定n步后的状态和最终终止标志
+                final_step = buffer[-1]
+                n_step_done = final_step['done']
+                
+ 
+                experience = Experience(
+                    obs=self.tol_state,
+                    action=self.tol_action,
+                    rewards=self.tol_rewards,
+                    next_obs=self.tol_next_state,
+                    log_probs=self.tol_log_probs,
+                    done=self.tol_done            
+                )
+                # 终止时清空缓冲区（避免跨回合污染）
+
+                experiences.append(experience)
+
+                if n_step_done:
                     self.n_step_buffers[i].clear()
+        
+                
+
+        # 更新状态
+        self.obs = next_obs
+
 
         return experiences
+
     
     def sample(self) -> Tuple[Union[List[Experience], dict], dict]:
         self.total_sample_number += self.sample_batch_size

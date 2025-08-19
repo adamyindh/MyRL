@@ -1,4 +1,4 @@
-# 当使用 from sac import * 从 sac.py 模块导入所有内容时，只有 ApproxContainer 和 SAC 这两个对象会被导入
+# 当使用 from mol import * 从 mol.py 模块导入所有内容时，只有 ApproxContainer 和 mol 这两个对象会被导入
 __all__ = ["ApproxContainer", "MOL"] 
 
 import torch
@@ -19,7 +19,7 @@ from Multi_RL.utils.tensorboard_setup import tb_tags
 
 class ApproxContainer(nn.Module):
     """
-    定义SAC算法中使用的所有的函数估计器，包含 1 个策略函数和 2 个价值函数（2个Q值）
+    定义MOL算法中使用的所有的函数估计器，包含 1 个策略函数和 2 个价值函数（2个Q值）
     ApproxBase 是基类。先尝试不使用基类编写函数估计器，直接继承 nn.Module 看是否可以（参考CleanRL的实现）
     """
     def __init__(self, **kwargs):
@@ -80,9 +80,10 @@ class MOL:
         self,
         gamma: float = 0.99,
         lamda: float = 0.005,
+        eps = 0.1,
         **kwargs: Any,
     ):
-        # 指定的参数主要是SAC算法的一些必要参数，除了这些参数外的其他参数是用于构造估计函数网络的参数
+        # 指定的参数主要是MOL算法的一些必要参数，除了这些参数外的其他参数是用于构造估计函数网络的参数
         self.networks = ApproxContainer(**kwargs)
         self.n_steps = kwargs['n_steps']
         self.gamma = kwargs['gamma']
@@ -109,15 +110,18 @@ class MOL:
         # 首先，更新 q 网络
         loss_q, q1, q2 = self._q_update(data)
         # 之后，更新 V 网络
-
+        loss_V,v=self._V_update(data)
         # 然后，更新 policy 网络
-        # 在此之间，向 data 中添加有关熵的数据，因为后面更新alpha的时候还需要使用这些数据
         obs = data["obs"]
+        act = data["act"]
+        old_logp = data["logp"]
+
         logits = self.networks.policy(obs)
         act_dist = self.networks.create_action_distributions(logits)
-        # 注意：new_act, new_logp 含有 policy 网络梯度的信息，因此可以直接使用这些数据来更新 policy 网络
-        new_act, new_logp = act_dist.rsample()
-        data.update({"new_act": new_act, "new_logp": new_logp})
+        current_logp = act_dist.log_prob(act)  # 当前策略下旧动作的对数概率
+        for n in range(self.n_steps):
+                ratio = torch.exp(current_logp - old_logp)
+
         # 更新 policy 网络
         loss_policy = self._policy_update(data)
 
@@ -127,9 +131,9 @@ class MOL:
 
         # 记录并返回 Tensorboard 存储的相关信息
         tb_info = {
-            "SAC/critic_q1-RL iter": q1.item(),
-            "SAC/critic_q2-RL iter": q2.item(),
-            "SAC/entropy-RL iter": entropy.item(),
+            "MOL/critic_q1-RL iter": q1.item(),
+            "MOL/critic_q2-RL iter": q2.item(),
+
 
             tb_tags["loss_critic"]: loss_q.item(),
             tb_tags["loss_actor"]: loss_policy.item(),
@@ -146,13 +150,14 @@ class MOL:
         用于根据 q 网络的损失函数更新 q 网络
         函数名前的单下划线 _ 是一种约定俗成的命名规范，表示该函数是类的内部方法（非公开接口）
         data（数据字典）中的数据说明
-        obs：当前状态
-        act：根据当前状态采样得到的实际动作
-        rew：奖励，rew=-cost，cost表示代价，即当前状态与目标状态之间的距离
+        因为是考虑n步数据的学习，所以下面的数据都是n步的
+        obs：当前状态(共n项，顺序排列)
+        act：根据当前状态采样得到的实际动作(共n项，与状态一一对应)
+        rew：奖励，rew=-cost，cost表示代价，即当前状态与目标状态之间的距离(共n项，与状态一一对应)
         注意：在其他算法中我们仍然使用rew（在DLAC中使用cost），只不过我们需要对环境的rew重新定义，定义为-cost
         使用rew而非cost，是为了和一些算法中的其他结构保持一致（例如最大化rew与最大化熵保持一致）
-        obs2：下一状态，根据单步 TD 还是多步 TD 而有所不同。具体指 N 步之后的状态。但是在 sac 算法中就指1步后的状态
-        done：在到达 obs2 之后，一个 episode 是否结束
+        obs2：下一状态(共n项，与状态一一对应)
+        done：在达到n步之后的状态时，一个 episode 是否结束
         """
         obs, act, rew, obs2, done = (
             data["obs"],
@@ -162,12 +167,18 @@ class MOL:
             data["done"],
         )
         
-        # 计算当前(s,a)下q网络的值
-        q1 = self.networks.q1(obs, act)
-        q2 = self.networks.q2(obs, act)
+        # 计算当前n步的(sn,an)下q网络的值
+        q1 = [self.networks.q1(obs[n], act[n]) for n in range(self.n_steps)]
+        q2 = [self.networks.q2(obs[n], act[n]) for n in range(self.n_steps)]
 
         # 计算 TD target
         with torch.no_grad():
+            #计算重要性采样
+            
+
+                
+
+
             # 对于随机policy，输出下一个状态生成动作的均值和标准差
             next_logits = self.networks.policy(obs2)
             next_act_dist = self.networks.create_action_distributions(next_logits)
