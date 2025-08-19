@@ -32,6 +32,13 @@ class Experience(NamedTuple):
     log_probs:np.ndarray
     done:np.ndarray
 
+    # obs: np.ndarray
+    # actions: np.ndarray
+    # rewards: float
+    # next_obs: np.ndarray
+    # dones: bool
+    # log_probs: float
+
 
 
 

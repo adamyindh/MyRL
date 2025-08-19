@@ -85,7 +85,7 @@ class SAC:
         self.networks = ApproxContainer(**kwargs)
         self.tau = tau
 
-
+        self.n_steps = kwargs['n_steps']
         self.gamma = kwargs['gamma']
 
         # 对网络中的 log_alpha 初始化
@@ -191,6 +191,8 @@ class SAC:
             next_q1 = self.networks.q1_target(obs2, next_act)
             next_q2 = self.networks.q2_target(obs2, next_act)
             next_q = torch.min(next_q1, next_q2)
+            print(obs.shape)
+            print(rew.shape)
             # backup 表示的就是 TD target，在 sac 算法中，使用一步 TD 来更新Q
             # 在 DLAC 算法中，cost 指的就是多步累积代价，此时的TD target = cost + gamma^N Q
             gamma_n = self.gamma ** self.n_steps  # 需传入n_step参数

@@ -78,8 +78,8 @@ class MOL:
     """
     def __init__(
         self,
-        gamma: float = 0.99,
-        lamda: float = 0.005,
+        gamma: float = 0.9,
+        lamda: float = 0.9,
         eps = 0.1,
         **kwargs: Any,
     ):
@@ -87,7 +87,8 @@ class MOL:
         self.networks = ApproxContainer(**kwargs)
         self.n_steps = kwargs['n_steps']
         self.gamma = kwargs['gamma']
-
+        self.eps = 0.1
+        self.lamd = 0.9
 
 
     @property
@@ -114,13 +115,15 @@ class MOL:
         # 然后，更新 policy 网络
         obs = data["obs"]
         act = data["act"]
+        act = data["act"]
         old_logp = data["logp"]
+        
+        
 
         logits = self.networks.policy(obs)
         act_dist = self.networks.create_action_distributions(logits)
-        current_logp = act_dist.log_prob(act)  # 当前策略下旧动作的对数概率
-        for n in range(self.n_steps):
-                ratio = torch.exp(current_logp - old_logp)
+        current_logp = act_dist.log_prob(act)  
+        ratio = torch.exp(current_logp - old_logp)
 
         # 更新 policy 网络
         loss_policy = self._policy_update(data)
@@ -159,38 +162,50 @@ class MOL:
         obs2：下一状态(共n项，与状态一一对应)
         done：在达到n步之后的状态时，一个 episode 是否结束
         """
-        obs, act, rew, obs2, done = (
+        obs, act, rew, obs2, old_logp, done = (
             data["obs"],
             data["act"],
             data["rew"],
             data["obs2"],
+            data["logp"],
             data["done"],
         )
         
         # 计算当前n步的(sn,an)下q网络的值
-        q1 = [self.networks.q1(obs[n], act[n]) for n in range(self.n_steps)]
-        q2 = [self.networks.q2(obs[n], act[n]) for n in range(self.n_steps)]
+        q1 = self.networks.q1(obs, act)
+        q2 = self.networks.q2(obs, act)
+        (batch_size,nstep)=q1.shape
 
+        #计算重要性采样
+        logits = self.networks.policy(obs)
+        act_dist = self.networks.create_action_distributions(logits)
+        current_logp = act_dist.log_prob(act)  
+        ratio = torch.exp(current_logp - old_logp)
+        ratio_clipped = torch.clamp(ratio, 1 - self.eps, 1 + self.eps)
         # 计算 TD target
         with torch.no_grad():
-            #计算重要性采样
-            
-
-                
-
-
             # 对于随机policy，输出下一个状态生成动作的均值和标准差
             next_logits = self.networks.policy(obs2)
             next_act_dist = self.networks.create_action_distributions(next_logits)
-            next_act, next_logp = next_act_dist.rsample()
+            next_act, next_logp = next_act_dist.log()
             next_q1 = self.networks.q1_target(obs2, next_act)
             next_q2 = self.networks.q2_target(obs2, next_act)
             next_q = torch.min(next_q1, next_q2)
-  
+           #计算n步的RQ算子
+            backup=[]
+            c=1
+            for i in range(batch_size):
+                r=q1[i,0]
+                r+=c*(rew[i,0]+ self.gamma*next_q1[i,0]-q1[i,0])
+                for j in range(nstep-1):
+                    c*=self.lamda*self.gamma*ratio[i,j+1]
+                    r+=c*(rew[i,j+1]+ self.gamma*next_q1[i,j+1]-q1[i,j+1])
+                
+                backup.append(r)
+            backup = torch.tensor(backup)
 
-            # 修改：n步TD目标 = 累积奖励 + (gamma^n) * (next_q
-            gamma_n = self.gamma ** self.n_steps  # 需传入n_steps参数
-            backup = rew + 
+
+            
 
         # 计算 2 个 q 网络的损失函数
         loss_q1 = ((q1 - backup) ** 2).mean()
