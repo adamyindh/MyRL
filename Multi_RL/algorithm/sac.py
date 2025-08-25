@@ -187,6 +187,24 @@ class SAC:
             # 对于随机policy，输出下一个状态生成动作的均值和标准差
             next_logits = self.networks.policy(obs2)
             next_act_dist = self.networks.create_action_distributions(next_logits)
+            next_q1=[]
+            next_q2=[]
+            for _ in range(10):
+                next_act, logp = next_act_dist.sample()
+                next1_q1 = self.networks.q1_target(obs2, next_act)
+                next1_q2 = self.networks.q2_target(obs2, next_act)
+                next_q1.append(next1_q1)
+                next_q2.append(next1_q2)
+            # 转换为张量（可选，根据需要）
+            next_q1 = torch.stack(next_q1)  # 形状 (10, action_dim)
+            print(next_q1.shape)
+            next_q1=next_q1.mean(dim=0)
+            print(next_q1.shape)
+            next_q2 = torch.stack(next_q2)  # 形状 (10,)
+            # 通过设置 sample_shape 生成10个样本
+            samples = next_act_dist.sample(sample_shape=(10,))  # 形状为 (10, ...)，...为动作本身的维度
+            # 分离出动作和对数概率（注意：不同分布的log_prob输入可能略有差异）
+            next_acts = samples  # 10个动作，形状为 (10, action_dim)
             next_act, next_logp = next_act_dist.rsample()
             next_q1 = self.networks.q1_target(obs2, next_act)
             next_q2 = self.networks.q2_target(obs2, next_act)

@@ -21,6 +21,46 @@ import warnings
 from Multi_RL.utils.common_utils import get_activation_func
 from Multi_RL.utils.act_distribution_cls import Action_Distribution_Cls
 
+# 转置层：实现X^T * X操作
+class TransposeMultiply(nn.Module):
+    def __init__(self):
+        super().__init__()
+    
+    def forward(self, x):
+        # x的形状通常为(batch_size, feature_dim)
+        # 计算X^T * X，结果形状为(batch_size, feature_dim, feature_dim)
+        return torch.bmm(x.unsqueeze(1), x.unsqueeze(2)).squeeze(1)
+        # 说明：
+        # 1. unsqueeze(1)将x从(batch, d)变为(batch, 1, d)
+        # 2. unsqueeze(2)将x从(batch, d)变为(batch, d, 1)
+        # 3. bmm进行批量矩阵乘法，得到(batch, 1, 1)
+        # 4. 最终输出形状为(batch, 1)
+
+
+def positive_mlp(sizes, activation, output_activation=nn.Identity):
+    """
+    修改后的MLP网络，最后一层为X^T * X操作
+    sizes：每一层输入的维度，例如：[obs_dim + act_dim, 64, 64]
+           注意：最后一层的输出维度由倒数第二层的维度决定
+    activation：隐藏层激活函数
+    output_activation：已弃用，因为最后一层固定为X^T * X
+    """
+    layers = []
+    # 构建隐藏层（不包含最后一层）
+    for j in range(len(sizes) - 2):  # 只循环到倒数第二层
+        layers += [nn.Linear(sizes[j], sizes[j + 1]), activation()]
+    
+    # 添加倒数第二层（最后一个线性层）
+    layers += [nn.Linear(sizes[-2], sizes[-1]), activation()]
+    
+    # 添加自定义的输出层：X^T * X
+    layers += [TransposeMultiply()]
+    
+    return nn.Sequential(*layers)
+
+
+
+
 def mlp(sizes, activation, output_activation=nn.Identity):
     """
     根据隐藏层数+隐藏层的大小、隐藏层激活函数、输出层激活函数形成 mlp 网络

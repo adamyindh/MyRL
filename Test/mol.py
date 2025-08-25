@@ -86,9 +86,10 @@ class MOL:
         # 指定的参数主要是MOL算法的一些必要参数，除了这些参数外的其他参数是用于构造估计函数网络的参数
         self.networks = ApproxContainer(**kwargs)
         self.n_steps = kwargs['n_steps']
+        self.batch_size = kwargs['replay_batch_size']
         self.gamma = kwargs['gamma']
         self.eps = 0.1
-        self.lamd = 0.9
+        self.lamda = 0.9
 
 
     @property
@@ -108,24 +109,29 @@ class MOL:
         """
         start_time = time.time()
 
+        data['obs']=data['obs']-self.target_value
+        data['obs2']=data['obs2']-self.target_value
+
         # 首先，更新 q 网络
         loss_q, q1, q2 = self._q_update(data)
         # 之后，更新 V 网络
         loss_V,v=self._V_update(data)
         # 然后，更新 policy 网络
+
         obs = data["obs"]
-        act = data["act"]
         act = data["act"]
         old_logp = data["logp"]
         
         
 
+
+        # 注意：new_act, new_logp 含有 policy 网络梯度的信息，因此可以直接使用这些数据来更新 policy 网络
+        # 但是在更新参数 alpha 的时候，需要使用不含有梯度信息的 new_logp（因为此时只关注alpha的更新）
+        
         logits = self.networks.policy(obs)
         act_dist = self.networks.create_action_distributions(logits)
-        current_logp = act_dist.log_prob(act)  
-        ratio = torch.exp(current_logp - old_logp)
-
-        # 更新 policy 网络
+        new_act, new_logp = act_dist.rsample()
+        data.update({"new_act": new_act, "new_logp": new_logp})
         loss_policy = self._policy_update(data)
 
 
@@ -162,50 +168,53 @@ class MOL:
         obs2：下一状态(共n项，与状态一一对应)
         done：在达到n步之后的状态时，一个 episode 是否结束
         """
-        obs, act, rew, obs2, old_logp, done = (
+        obs, act, rew, obs2, old_logp = (
             data["obs"],
             data["act"],
             data["rew"],
             data["obs2"],
             data["logp"],
-            data["done"],
         )
         
         # 计算当前n步的(sn,an)下q网络的值
         q1 = self.networks.q1(obs, act)
         q2 = self.networks.q2(obs, act)
-        (batch_size,nstep)=q1.shape
 
-        #计算重要性采样
+        q = torch.min(q1, q2)
         logits = self.networks.policy(obs)
         act_dist = self.networks.create_action_distributions(logits)
         current_logp = act_dist.log_prob(act)  
         ratio = torch.exp(current_logp - old_logp)
-        ratio_clipped = torch.clamp(ratio, 1 - self.eps, 1 + self.eps)
+        ratio_clipped = torch.clamp(ratio, 0, 1 + self.eps)
         # 计算 TD target
         with torch.no_grad():
-            # 对于随机policy，输出下一个状态生成动作的均值和标准差
+            # 计算下一个状态的期望
             next_logits = self.networks.policy(obs2)
             next_act_dist = self.networks.create_action_distributions(next_logits)
-            next_act, next_logp = next_act_dist.log()
-            next_q1 = self.networks.q1_target(obs2, next_act)
-            next_q2 = self.networks.q2_target(obs2, next_act)
+            next_q1=[]
+            next_q2=[]
+            for _ in range(10):
+                next_act, logp = next_act_dist.sample()
+                next1_q1 = self.networks.q1_target(obs2, next_act)
+                next1_q2 = self.networks.q2_target(obs2, next_act)
+                next_q1.append(next1_q1)
+                next_q2.append(next1_q2)
+            # 转换为张量并求期望
+            next_q1 = torch.stack(next_q1)  
+            next_q1=next_q1.mean(dim=0)
+            next_q2 = torch.stack(next_q2)  
+            next_q2=next_q1.mean(dim=0)
             next_q = torch.min(next_q1, next_q2)
            #计算n步的RQ算子
             backup=[]
             c=1
-            for i in range(batch_size):
-                r=q1[i,0]
-                r+=c*(rew[i,0]+ self.gamma*next_q1[i,0]-q1[i,0])
-                for j in range(nstep-1):
-                    c*=self.lamda*self.gamma*ratio[i,j+1]
-                    r+=c*(rew[i,j+1]+ self.gamma*next_q1[i,j+1]-q1[i,j+1])
-                
+            for i in range(self.batch_size):
+                r=q[i,0]
+                for j in range(self.n_steps):
+                    c*=self.lamda*self.gamma*ratio_clipped[i,j]
+                    r+=c*(rew[i,j]+ self.gamma*next_q[i,j]-q[i,j])
                 backup.append(r)
             backup = torch.tensor(backup)
-
-
-            
 
         # 计算 2 个 q 网络的损失函数
         loss_q1 = ((q1 - backup) ** 2).mean()
@@ -222,60 +231,101 @@ class MOL:
         return loss_q, q1.detach().mean(), q2.detach().mean()
 
     def _V_update(self, data: Dict[str, Tensor]):
-        # 更新 V 依赖于 q 值，目标为3项。在更新V之前，需要屏蔽q网络的梯度
-        for p in self.networks.q1.parameters():
-            p.requires_grad = False
-        for p in self.networks.q2.parameters():
-            p.requires_grad = False
 
-        # 准备计算数据
-        obs, new_act, new_logp = (
+        obs, act,  obs2, old_logp = (
             data["obs"],
-            data["new_act"],
-            data["new_logp"],
+            data["act"],
+            data["obs2"],
+            data["logp"],
         )
+        
+        v = self.networks.v(obs)
+        v2 = self.networks.v(obs2)
 
-        # 计算 V 网络的损失函数
-        q1 = self.networks.q1(obs, new_act)
-        q2 = self.networks.q2(obs, new_act)
+        (batch_size,n_steps,obs_dim)=obs.shape
+
         # 损失函数1：
-        loss_V = (self._get_alpha() * new_logp - torch.min(q1, q2)).mean()
+        zero_obs=torch.zeros(obs_dim)
+        loss_V1 =self.networks.v(zero_obs)
 
-        # policy 网络更新
+        # 损失函数2：
+        logits = self.networks.policy(obs)
+        act_dist = self.networks.create_action_distributions(logits)
+        current_logp = act_dist.log_prob(act)  
+        ratio = torch.exp(current_logp - old_logp)
+        ratio_clipped = torch.clamp(ratio, 0, 1 + self.eps)
+
+        loss_V2=[]
+        c=1
+        for i in range(self.batch_size):
+            J=0
+            for j in range(self.n_steps):
+                Jn=max(v[i,0]-(1-self.lamda**j)*v2[i,j],0)
+                c*=ratio_clipped[i,j]
+                J+=(1-self.lamda)*(self.lamda**j)*Jn
+            J+=(self.lamda**self.n_steps)*Jn
+            loss_V2.append(J)
+        loss_V2 = torch.tensor(loss_V2)
+
+
+        # V 网络更新
+        loss_V = a * loss_V1 + b * loss_V2.mean()
+
         self.networks.V_optimizer.zero_grad()
         loss_V.backward()
         self.networks.V_optimizer.step()
 
-        # 更新完 policy 网络之后，需要把之前屏蔽了梯度的 q 网络解除
-        for p in self.networks.q1.parameters():
-            p.requires_grad = True
-        for p in self.networks.q2.parameters():
-            p.requires_grad = True
-
-        return loss_policy, entropy
+        return loss_V, v.detach().mean()
 
 
     
     def _policy_update(self, data: Dict[str, Tensor]):
-        # 更新 policy 依赖于 q 值，目标是使 。在更新policy之前，需要屏蔽q网络的梯度
+        # 更新 policy 依赖于 q 值，目标是使Q值最大化的同时满足熵条件和V函数限制条件 。在更新policy之前，需要屏蔽q网络的梯度
         for p in self.networks.q1.parameters():
             p.requires_grad = False
         for p in self.networks.q2.parameters():
             p.requires_grad = False
 
         # 准备计算数据
-        obs, new_act, new_logp = (
+        obs, new_act, new_logp, act, obs2, logp= (
             data["obs"],
             data["new_act"],
             data["new_logp"],
+            data["act"],
+            data["obs2"],
+            data["logp"],
         )
-
+        
+        obs1=obs[:,0,:]
+        new_act1=new_act[:,0,:]
         # 计算 policy 网络的损失函数
-        q1 = self.networks.q1(obs, new_act)
-        q2 = self.networks.q2(obs, new_act)
+        q1 = self.networks.q1(obs1, new_act1)
+        q2 = self.networks.q2(obs1, new_act1)
+        
+        ratio2=torch.exp(new_logp - logp)
+        v = self.networks.v(obs)
+        v2 = self.networks.v(obs2)
+
+        logits = self.networks.policy(obs)
+        act_dist = self.networks.create_action_distributions(logits)
+        current_logp = act_dist.log_prob(act)  
+        ratio = torch.exp(current_logp - logp)
+        ratio_clipped = torch.clamp(ratio, 0, 1 + self.eps)
+
+        loss_V2=[]
+        c=1
+        for i in range(self.batch_size):
+            J=0
+            for j in range(self.n_steps):
+                Jn=max(v[i,0]-(1-self.lamda**j)*v2[i,j],0)
+                c*=ratio_clipped[i,j]
+                J+=(1-self.lamda)*(self.lamda**j)*Jn
+            J+=(self.lamda**self.n_steps)*Jn
+            loss_V2.append(J)
+        loss_V2 = torch.tensor(loss_V2)
 
         # 损失函数：
-        loss_policy = 
+        loss_policy = (self.omega * new_logp + self.beta * ratio2 * loss_V2 - torch.min(q1, q2)).mean()
 
         # policy 网络更新
         self.networks.policy_optimizer.zero_grad()
@@ -292,27 +342,18 @@ class MOL:
         return loss_policy, entropy
 
 
-    def _alpha_update(self, data: Dict[str, Tensor]):
+    def _omega_update(self, data: Dict[str, Tensor]):
 
-        new_logp = data["new_logp"]
+        omega = omega + deta * 
 
-        # 计算关于 alpha 的损失函数，注意要保留待更新参数 alpha 的梯度信息
-        # 但是要切断 new_logp 的梯度信息
-        alpha = self._get_alpha(True)
-        loss_alpha = -alpha * (  )
-
-        # alpha 更新
-        self.networks.alpha_optimizer.zero_grad()
-        loss_alpha.backward()
-        self.networks.alpha_optimizer.step()
 
     def _beta_update(self, data: Dict[str, Tensor]):
 
         new_logp = data["new_logp"]
 
-        # 计算关于 beta 的损失函数，注意要保留待更新参数 alpha 的梯度信息
-        beta = self._get_beta(True)
-        loss_beta = -beta * (   )
+        # 计算关于 beta 的损失函数，注意要保留待更新参数 beta 的梯度信息
+        beta = beta + deta * 
+
 
         # beta 更新
         self.networks.beta_optimizer.zero_grad()
@@ -321,6 +362,19 @@ class MOL:
 
 
     def _target_update(self,):
-        # 基于更新后的 q 网络参数更新目标 q 网络(需要吗？)
+        # 基于更新后的 q 网络参数更新目标 q 网络
         # 目标网络始终不需要梯度信息，因此将其置于屏蔽梯度的环境中
-        
+        with torch.no_grad():
+            # 软更新（Soft Update），也称为Polyak 平均
+            polyak = 1 - self.tau
+            for p, p_targ in zip(
+                self.networks.q1.parameters(), self.networks.q1_target.parameters()
+            ):
+                # mul_ 和 add_ 分别为原地乘法和原地加法
+                p_targ.data.mul_(polyak)
+                p_targ.data.add_((1 - polyak) * p.data)
+            for p, p_targ in zip(
+                self.networks.q2.parameters(), self.networks.q2_target.parameters()
+            ):
+                p_targ.data.mul_(polyak)
+                p_targ.data.add_((1 - polyak) * p.data)
