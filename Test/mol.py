@@ -333,6 +333,10 @@ class MOL:
         self.networks.policy_optimizer.step()
 
 
+        # beta 与 omega 更新
+        self.beta = self.beta + deta * new_logp.mean
+        self.omega = self.omega + deta * (ratio2 * loss_V2).mean
+
         # 更新完 policy 网络之后，需要把之前屏蔽了梯度的 q 网络解除
         for p in self.networks.q1.parameters():
             p.requires_grad = True
@@ -340,25 +344,6 @@ class MOL:
             p.requires_grad = True
 
         return loss_policy, entropy
-
-
-    def _omega_update(self, data: Dict[str, Tensor]):
-
-        omega = omega + deta * 
-
-
-    def _beta_update(self, data: Dict[str, Tensor]):
-
-        new_logp = data["new_logp"]
-
-        # 计算关于 beta 的损失函数，注意要保留待更新参数 beta 的梯度信息
-        beta = beta + deta * 
-
-
-        # beta 更新
-        self.networks.beta_optimizer.zero_grad()
-        loss_beta.backward()
-        self.networks.beta_optimizer.step()
 
 
     def _target_update(self,):
